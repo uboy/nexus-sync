@@ -1,3 +1,4 @@
+import argparse
 import os
 import shutil
 import requests
@@ -9,6 +10,8 @@ import re
 import subprocess
 import tempfile
 import stat
+
+# Nexus API reference https://help.sonatype.com/en/api-reference.html
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -571,12 +574,47 @@ def safe_cleanup(directory):
             break
 
 
+def handle_invalidate_cache(args, config):
+    """Invalidate cache"""
+    target_config = config['target']
+    timeout = config['settings'].get('request_timeout', 30)
+    target_repository = target_config['repository']
+    if args.repo:
+        target_repository = args.repo
+
+    logger.info("Invalidating cache...")
+    try:
+        response = requests.post(
+            f"{target_config['nexus_url']}/service/rest/v1/repositories/{target_repository}/invalidate-cache",
+            auth=(target_config['username'], target_config['password']),
+            timeout=timeout
+        )
+        response.raise_for_status()
+        logger.info("Cache invalidated successfully")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Cache invalidation failed: {e}")
+        return False
+
+    return True
+
+
 def main():
     """Main migration function."""
+    arg_parser = argparse.ArgumentParser(description="Nexus sync tool")
+    subparsers = arg_parser.add_subparsers(dest="command")
+    p_issue = subparsers.add_parser("invalidate-cache")
+    p_issue.add_argument("--repo")
+    args = arg_parser.parse_args()
+
     logger.info("Starting NPM package migration...")
 
     # Load configuration
     config = load_config()
+
+    # check if invalidate cache command
+    if args.command == "invalidate-cache":
+        handle_invalidate_cache(args, config)
+        return
 
     # Load previous sync state
     sync_state = load_sync_state()
