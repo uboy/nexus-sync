@@ -45,6 +45,11 @@ def create_default_config():
             "username": "<username>",
             "password": "<pass>"
         },
+        "proxy": {
+            "http": "",
+            "https": "",
+            "no_proxy": ""
+        },
         "settings": {
             "batch_size": 10,
             "download_timeout": 60,
@@ -78,6 +83,27 @@ def load_config():
         logger.error(f"Error loading configuration: {e}")
         logger.info("Creating new default configuration...")
         return create_default_config()
+
+
+def get_proxies(config):
+    """Get proxy settings from config or environment variables."""
+    proxies = {}
+    
+    # Check config first
+    config_proxy = config.get('proxy', {})
+    http_proxy = config_proxy.get('http') or os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
+    https_proxy = config_proxy.get('https') or os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')
+    no_proxy = config_proxy.get('no_proxy') or os.environ.get('NO_PROXY') or os.environ.get('no_proxy')
+
+    if http_proxy:
+        proxies['http'] = http_proxy
+    if https_proxy:
+        proxies['https'] = https_proxy
+    
+    # requests handles no_proxy internally if we use its session or environment
+    # but if we pass proxies dict, we might need to be explicit or let it be
+    
+    return proxies, no_proxy
 
 
 def sanitize_filename(filename):
@@ -158,13 +184,14 @@ def parse_nexus_date(date_string):
         return None
 
 
-def get_repository_type(nexus_url, repository, username, password, timeout=30):
+def get_repository_type(nexus_url, repository, username, password, timeout=30, proxies=None):
     """Check if the repository is proxy or hosted."""
     url = f"{nexus_url}/service/rest/v1/repositories/{repository}"
     try:
         response = requests.get(url,
                                 #auth=(username, password),
-                                timeout=timeout)
+                                timeout=timeout,
+                                proxies=proxies)
         response.raise_for_status()
         repo_data = response.json()
         repo_type = repo_data.get('type', '').lower()
@@ -175,7 +202,7 @@ def get_repository_type(nexus_url, repository, username, password, timeout=30):
         raise
 
 
-def get_assets(nexus_url, repository, username, password, last_sync_date=None, timeout=30, max_pages=1):
+def get_assets(nexus_url, repository, username, password, last_sync_date=None, timeout=30, max_pages=1, proxies=None):
     """Retrieve assets from the source Nexus repository, optionally filtered by date."""
     base_url = f"{nexus_url}/service/rest/v1/assets?repository={repository}"
 
@@ -197,7 +224,7 @@ def get_assets(nexus_url, repository, username, password, last_sync_date=None, t
     while url and page <= max_pages:
         try:
             logger.info(f"Fetching assets page {page}/{max_pages}...")
-            response = requests.get(url, auth=(username, password), timeout=timeout)
+            response = requests.get(url, auth=(username, password), timeout=timeout, proxies=proxies)
             response.raise_for_status()
             data = response.json()
 
@@ -251,7 +278,7 @@ def get_assets(nexus_url, repository, username, password, last_sync_date=None, t
     return filtered_assets if last_sync_date else assets
 
 
-def download_asset(asset, download_dir, username=None, password=None, timeout=60):
+def download_asset(asset, download_dir, username=None, password=None, timeout=60, proxies=None):
     """Download an asset from the source Nexus to local storage with authentication."""
     asset_url = asset['downloadUrl']
     asset_path = asset['path']
@@ -272,7 +299,7 @@ def download_asset(asset, download_dir, username=None, password=None, timeout=60
         # Use authentication if provided
         auth = (username, password) if username and password else None
 
-        with requests.get(asset_url, stream=True, timeout=timeout, auth=auth) as r:
+        with requests.get(asset_url, stream=True, timeout=timeout, auth=auth, proxies=proxies) as r:
             r.raise_for_status()
             with open(local_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
@@ -290,7 +317,7 @@ def download_asset(asset, download_dir, username=None, password=None, timeout=60
         raise
 
 
-def upload_npm_package(nexus_url, repository, username, password, local_path, npm_path, timeout=120):
+def upload_npm_package(nexus_url, repository, username, password, local_path, npm_path, timeout=120, proxies=None):
     """Upload NPM package to target Nexus using the correct NPM upload endpoint."""
     upload_url = f"{nexus_url}/service/rest/v1/components?repository={repository}"
 
@@ -325,7 +352,8 @@ def upload_npm_package(nexus_url, repository, username, password, local_path, np
                 files=files,
                 data=data,
                 headers=headers,
-                timeout=timeout
+                timeout=timeout,
+                proxies=proxies
             )
             response.raise_for_status()
             logger.debug(f"Uploaded: {npm_path} to {upload_url}")
@@ -337,7 +365,7 @@ def upload_npm_package(nexus_url, repository, username, password, local_path, np
         raise
 
 
-def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, timeout=60):
+def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, timeout=60, proxies=None, no_proxy=None):
     """Trigger proxy repository to cache the NPM package using npm pack."""
     # Extract package name and version
     if npm_path.startswith('/@'):
@@ -364,6 +392,16 @@ def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, tim
             #f"//{registry_host}/:_authToken={base64.b64encode(f'{username}:{password}'.encode()).decode()}\n"
             f"strict-ssl=false\n"
         )
+        
+        # Add proxy to .npmrc if provided
+        if proxies:
+            if 'http' in proxies:
+                npmrc_content += f"proxy={proxies['http']}\n"
+            if 'https' in proxies:
+                npmrc_content += f"https-proxy={proxies['https']}\n"
+        if no_proxy:
+            npmrc_content += f"noproxy={no_proxy}\n"
+            
         npmrc_file.write(npmrc_content)
         npmrc_file_path = npmrc_file.name
         logger.debug(f"Created temporary .npmrc at {npmrc_file_path} with content:\n{npmrc_content}")
@@ -377,6 +415,19 @@ def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, tim
         logger.error(f"Failed to set permissions or read {npmrc_file_path}: {e}")
         raise
 
+    # Prepare environment with proxy variables
+    env = os.environ.copy()
+    if proxies:
+        if 'http' in proxies:
+            env['HTTP_PROXY'] = proxies['http']
+            env['http_proxy'] = proxies['http']
+        if 'https' in proxies:
+            env['HTTPS_PROXY'] = proxies['https']
+            env['https_proxy'] = proxies['https']
+    if no_proxy:
+        env['NO_PROXY'] = no_proxy
+        env['no_proxy'] = no_proxy
+
     # Create a temporary directory for npm pack output
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
@@ -385,7 +436,8 @@ def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, tim
                 ['npm', 'pack', package_spec, '--userconfig', npmrc_file_path, '--pack-destination', temp_dir, '--loglevel', 'verbose', '--registry', registry_url],
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                env=env
             )
             result.check_returncode()
             logger.debug(f"npm pack output: {result.stdout}")
@@ -412,7 +464,7 @@ def trigger_proxy_cache(nexus_url, repository, npm_path, username, password, tim
                 logger.warning(f"Could not remove temporary .npmrc: {e}")
 
 
-def migrate_assets_batch(assets, config):
+def migrate_assets_batch(assets, config, proxies=None, no_proxy=None):
     """Process assets in batches to avoid overwhelming the servers."""
     settings = config['settings']
     source_config = config['source']
@@ -432,7 +484,8 @@ def migrate_assets_batch(assets, config):
         target_config['repository'],
         target_config['username'],
         target_config['password'],
-        settings.get('request_timeout', 30)
+        settings.get('request_timeout', 30),
+        proxies=proxies
     )
 
     for i in range(0, total_assets, batch_size):
@@ -455,7 +508,9 @@ def migrate_assets_batch(assets, config):
                         asset['path'],
                         target_config['username'],
                         target_config['password'],
-                        settings.get('download_timeout', 60)
+                        settings.get('download_timeout', 60),
+                        proxies=proxies,
+                        no_proxy=no_proxy
                     )
                     successful_uploads += 1
                     synced_assets.append({
@@ -471,7 +526,8 @@ def migrate_assets_batch(assets, config):
                         DOWNLOAD_DIR,
                         source_config['username'],
                         source_config['password'],
-                        settings.get('download_timeout', 60)
+                        settings.get('download_timeout', 60),
+                        proxies=proxies
                     )
 
                 # Upload to target Nexus
@@ -482,7 +538,8 @@ def migrate_assets_batch(assets, config):
                         target_config['password'],
                         local_path,
                         asset['path'],
-                        settings.get('upload_timeout', 120)
+                        settings.get('upload_timeout', 120),
+                        proxies=proxies
                     )
 
                     successful_uploads += 1
@@ -510,7 +567,7 @@ def migrate_assets_batch(assets, config):
     return successful_uploads, failed_uploads, synced_assets
 
 
-def validate_credentials(config):
+def validate_credentials(config, proxies=None):
     """Validate that both source and target credentials work."""
     source_config = config['source']
     target_config = config['target']
@@ -521,7 +578,8 @@ def validate_credentials(config):
         response = requests.get(
             f"{source_config['nexus_url']}/service/rest/v1/repositories",
             auth=(source_config['username'], source_config['password']),
-            timeout=timeout
+            timeout=timeout,
+            proxies=proxies
         )
         response.raise_for_status()
         logger.info("Source credentials validated successfully")
@@ -534,7 +592,8 @@ def validate_credentials(config):
         response = requests.get(
             f"{target_config['nexus_url']}/service/rest/v1/repositories",
             #auth=(target_config['username'], target_config['password']),
-            timeout=timeout
+            timeout=timeout,
+            proxies=proxies
         )
         response.raise_for_status()
         logger.info("Target credentials validated successfully")
@@ -574,7 +633,7 @@ def safe_cleanup(directory):
             break
 
 
-def handle_invalidate_cache(args, config):
+def handle_invalidate_cache(args, config, proxies=None):
     """Invalidate cache"""
     target_config = config['target']
     timeout = config['settings'].get('request_timeout', 30)
@@ -587,7 +646,8 @@ def handle_invalidate_cache(args, config):
         response = requests.post(
             f"{target_config['nexus_url']}/service/rest/v1/repositories/{target_repository}/invalidate-cache",
             auth=(target_config['username'], target_config['password']),
-            timeout=timeout
+            timeout=timeout,
+            proxies=proxies
         )
         response.raise_for_status()
         logger.info("Cache invalidated successfully")
@@ -610,10 +670,17 @@ def main():
 
     # Load configuration
     config = load_config()
+    
+    # Get proxy settings
+    proxies, no_proxy = get_proxies(config)
+    if proxies:
+        logger.info(f"Using proxies: {proxies}")
+    if no_proxy:
+        logger.info(f"Using NO_PROXY: {no_proxy}")
 
     # check if invalidate cache command
     if args.command == "invalidate-cache":
-        handle_invalidate_cache(args, config)
+        handle_invalidate_cache(args, config, proxies=proxies)
         return
 
     # Load previous sync state
@@ -626,7 +693,7 @@ def main():
         logger.info("Full sync mode: no previous sync detected")
 
     # Validate credentials before starting
-    if not validate_credentials(config):
+    if not validate_credentials(config, proxies=proxies):
         logger.error("Credential validation failed. Please check your configuration.")
         return
 
@@ -642,7 +709,8 @@ def main():
             source_config['password'],
             last_sync_date,
             config['settings'].get('request_timeout', 30),
-            config['settings'].get('max_pages', 1)
+            config['settings'].get('max_pages', 1),
+            proxies=proxies
         )
 
         if not assets:
@@ -650,7 +718,7 @@ def main():
             return
 
         # Process assets in batches
-        successful, failed, synced_assets = migrate_assets_batch(assets, config)
+        successful, failed, synced_assets = migrate_assets_batch(assets, config, proxies=proxies, no_proxy=no_proxy)
 
         # Save sync state after successful migration
         if synced_assets:
