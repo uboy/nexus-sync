@@ -88,8 +88,21 @@ pip install requests
 
 1. **Run the Script**:
    ```bash
-   python nexusync.py
+   python nexussync.py
    ```
+   - Legacy asset-scan mode remains the default when no flags are provided.
+   - Known-package mode only:
+     ```bash
+     python nexussync.py --sync-known
+     ```
+   - Combined mode: sync known packages first, then discover package names changed since the previous discovery checkpoint:
+     ```bash
+     python nexussync.py --sync-known --discover-new
+     ```
+   - Invalidate cache for all accessible npm proxy repositories on the target Nexus:
+     ```bash
+     python nexussync.py invalidate-cache --all-repos
+     ```
    - The script loads the configuration from `nexus_sync_config.json`.
    - It checks the last sync state (`nexus_sync_state.json`) for incremental sync.
    - It fetches assets from the source Nexus, downloads/uploads (for hosted) or triggers caching (for proxy), and saves the sync state.

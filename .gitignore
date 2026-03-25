@@ -1,3 +1,16 @@
 /nexus_sync_config.json
 /nexus_sync_state.json
-.idea
+.idea/
+.scratchpad/
+coordination/
+archive/
+__pycache__/
+tests/__pycache__/
+*.pyc
+*.bak
+sync.log
+node_modules/
+package.json
+package-lock.json
+downloaded_assets/
+nexusync.py
