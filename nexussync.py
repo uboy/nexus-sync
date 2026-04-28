@@ -133,6 +133,7 @@ def default_package_state():
         'last_checked': None,
         'last_synced': None,
         'metadata_initialized': False,
+        'deleted': False,
     }
 
 
@@ -214,6 +215,7 @@ def normalize_sync_state(raw_state):
             'last_checked': package_state.get('last_checked'),
             'last_synced': package_state.get('last_synced'),
             'metadata_initialized': bool(package_state.get('metadata_initialized', False)),
+            'deleted': bool(package_state.get('deleted', False)),
         })
         normalized_known_packages[package_name] = current
 
@@ -938,6 +940,9 @@ def sync_known_packages(sync_state, config, package_names=None, forced_versions_
 
     for package_name in package_names:
         package_state = ensure_package_state(sync_state, package_name)
+        if package_state.get('deleted'):
+            logger.info(f"Skipping deleted package: {package_name}")
+            continue
         forced_versions = forced_versions_by_package.get(package_name, [])
         logger.info(f"Checking metadata for package: {package_name}")
         try:
@@ -1014,6 +1019,78 @@ def sync_known_packages(sync_state, config, package_names=None, forced_versions_
         total_failed,
     )
     return total_successful, total_failed, synced_assets
+
+
+def check_deleted_packages(sync_state, config, proxies=None):
+    """Check all known packages against source Nexus and interactively mark 404s as deleted."""
+    source_config = config['source']
+    target_config = config['target']
+    known_packages = sync_state.get('known_packages', {})
+
+    package_names = sorted(known_packages.keys())
+    checked = 0
+    marked_deleted = 0
+
+    for package_name in package_names:
+        package_state = known_packages[package_name]
+        if package_state.get('deleted'):
+            continue
+
+        checked += 1
+        logger.info(f"Checking package: {package_name}")
+
+        try:
+            metadata_response = fetch_package_metadata(
+                source_config['nexus_url'],
+                source_config['repository'],
+                package_name,
+                source_config['username'],
+                source_config['password'],
+                timeout=30,
+                etag=package_state.get('etag'),
+                proxies=proxies,
+            )
+            # 200 or 304 — package exists
+            logger.info(f"  OK (status {metadata_response['status']})")
+            continue
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                source_url = build_package_metadata_url(
+                    source_config['nexus_url'], source_config['repository'], package_name
+                )
+                target_url = build_package_metadata_url(
+                    target_config['nexus_url'], target_config['repository'], package_name
+                )
+                versions = package_state.get('known_versions', [])
+                print(f"\n  Package NOT FOUND (404): {package_name}")
+                print(f"    Known versions : {', '.join(versions) if versions else '(none)'}")
+                print(f"    Source URL     : {source_url}")
+                print(f"    Target URL     : {target_url}")
+
+                while True:
+                    choice = input("  [m]ark as deleted / [s]kip / [q]uit > ").strip().lower()
+                    if choice == 'm':
+                        package_state['deleted'] = True
+                        marked_deleted += 1
+                        logger.info(f"  Marked as deleted: {package_name}")
+                        break
+                    elif choice == 's':
+                        logger.info(f"  Skipped: {package_name}")
+                        break
+                    elif choice == 'q':
+                        logger.info("Aborting check-deleted.")
+                        print(f"\nSummary: checked {checked} package(s), marked {marked_deleted} as deleted.")
+                        return
+                    else:
+                        print("  Please enter m, s, or q.")
+            else:
+                logger.error(f"  HTTP error for {package_name}: {e}")
+                continue
+        except requests.exceptions.RequestException as e:
+            logger.error(f"  Request error for {package_name}: {e}")
+            continue
+
+    print(f"\nSummary: checked {checked} package(s), marked {marked_deleted} as deleted.")
 
 
 def collect_new_packages_from_assets(assets, known_package_names):
@@ -1266,6 +1343,11 @@ def main():
         action='store_true',
         help='After known-package sync, discover package names changed since the last discovery checkpoint and process them too.'
     )
+    arg_parser.add_argument(
+        '--check-deleted',
+        action='store_true',
+        help='Check all known packages against source Nexus; interactively mark packages returning 404 as deleted.'
+    )
     subparsers = arg_parser.add_subparsers(dest='command')
     p_issue = subparsers.add_parser('invalidate-cache')
     p_issue.add_argument('--repo')
@@ -1287,6 +1369,12 @@ def main():
 
     if args.command == 'invalidate-cache':
         handle_invalidate_cache(args, config, proxies=proxies)
+        return
+
+    if args.check_deleted:
+        sync_state = load_sync_state()
+        check_deleted_packages(sync_state, config, proxies=proxies)
+        save_sync_state(sync_state)
         return
 
     if args.discover_new and not args.sync_known:
