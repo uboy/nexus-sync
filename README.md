@@ -2,7 +2,7 @@
 
 ## Overview
 
-`nexusync.py` is a Python script designed to synchronize NPM packages between two Nexus repositories. It supports:
+`nexussync.py` is a Python script designed to synchronize NPM packages between two Nexus repositories. It supports:
 - **Hosted Repositories**: Downloads packages from a source Nexus and uploads them to a target hosted Nexus.
 - **Proxy Repositories**: Triggers caching of packages in a target proxy Nexus using `npm pack`.
 - **Incremental Sync**: Only processes packages modified since the last sync, based on a stored state file.
@@ -36,7 +36,7 @@ pip install requests
 ## Setup
 
 1. **Clone or Download the Script**:
-   - Place `nexusync.py` in your working directory.
+   - Place `nexussync.py` in your working directory.
 
 2. **Configure the Script**:
    - The script uses a configuration file (`nexus_sync_config.json`) to specify source and target Nexus details.
@@ -103,6 +103,15 @@ pip install requests
      ```bash
      python nexussync.py invalidate-cache --all-repos
      ```
+   - Detect packages that disappeared from the source and mark them as deleted in the sync
+     state, so they are not re-fetched on every run:
+     ```bash
+     python nexussync.py --check-deleted
+     ```
+   - Invalidate cache for a single npm proxy repository instead of all of them:
+     ```bash
+     python nexussync.py invalidate-cache --repo <repository-name>
+     ```
    - The script loads the configuration from `nexus_sync_config.json`.
    - It checks the last sync state (`nexus_sync_state.json`) for incremental sync.
    - It fetches assets from the source Nexus, downloads/uploads (for hosted) or triggers caching (for proxy), and saves the sync state.
@@ -115,7 +124,7 @@ pip install requests
 3. **Example**:
    - To sync `<package>` from `https://<nexus>/repository/<reponame>` to a proxy at `http://<nexus>/repository/<reponame>`:
      - Ensure `nexus_sync_config.json` is configured.
-     - Run: `python nexusync.py`
+     - Run: `python nexussync.py`
      - Check logs for success or errors.
 
 ## Features
